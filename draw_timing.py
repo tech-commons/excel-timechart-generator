@@ -26,9 +26,9 @@ def wave_policy(curr, prev, is_bus=False):
             "value": None,
         }
 
-
 def draw_wave(ws, row, col_start, values, is_bus=False):
     prev = values[0]
+    prev_disp = None
 
     for i, curr in enumerate(values):
         col = col_start + i
@@ -37,8 +37,12 @@ def draw_wave(ws, row, col_start, values, is_bus=False):
         p = wave_policy(curr, prev, is_bus)
         cell.border = make_border(p)
 
-        if p["value"] is not None:
-            cell.value = p["value"]
+        disp = p["value"]
+
+        # ★ 表示が変わったときだけ書く
+        if disp is not None and disp != prev_disp:
+            cell.value = disp
+            prev_disp = disp
 
         prev = curr
 

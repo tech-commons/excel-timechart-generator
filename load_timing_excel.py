@@ -19,7 +19,7 @@ def load_timing_excel(
 
     Returns:
         waves: dict[str, tuple[int, list[str]]]
-        logic: dict[str, str]
+        logic: dict[str, tuple[int, str]]
     """
 
     df = pd.read_excel(filename)
@@ -46,7 +46,7 @@ def load_timing_excel(
     logic_df = df[df[expr_col].notna()]
 
     logic = {
-        row[signal_col]: row[expr_col]
+        row[signal_col]: (row[bit_width_col], row[expr_col])
         for _, row in logic_df.iterrows()
     }
 
