@@ -1,6 +1,32 @@
 import ast
 import operator
 
+import ast
+
+class _DepCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.names = set()
+
+    def visit_Name(self, node):
+        self.names.add(node.id)
+
+    def visit_Call(self, node):
+        # REG(...) などの関数名は依存として数えない
+        for arg in node.args:
+            self.visit(arg)
+        for kw in node.keywords:
+            self.visit(kw.value)
+
+def extract_deps(expr: str) -> set[str]:
+    """
+    論理式 expr から参照している信号名を抽出する
+    """
+    tree = ast.parse(expr, mode="eval")
+    v = _DepCollector()
+    v.visit(tree)
+    return v.names
+
+
 class SafeEvaluator(ast.NodeVisitor):
     BIN_OPS = {
         ast.Add: operator.add,
@@ -160,6 +186,28 @@ def eval_reg(args, env, prev_val):
 
     return prev_val
 
+from collections import deque
+
+def topo_sort(graph):
+    graph = {k: set(v) for k, v in graph.items()}
+    result = []
+    q = deque([n for n, d in graph.items() if not d])
+
+    while q:
+        n = q.popleft()
+        result.append(n)
+
+        for m, deps in graph.items():
+            if n in deps:
+                deps.remove(n)
+                if not deps:
+                    q.append(m)
+
+    if any(graph[n] for n in graph):
+        raise ValueError("Combinational loop detected")
+
+    return result
+
 
 
 
@@ -183,74 +231,99 @@ def build_env(waves_all, t):
 
     return env
 
-
 def simulate(waves, logic):
     """
-    waves: 入力信号
+    waves:
       { "A": (1, ["0","1",...]) }
 
-    logic: 生成信号の論理式
-      { "Q": (4, "Q@1 + D") }
-
+    logic:
+      { "cnt": (10, "REG(en=A, d=cnt+1, init=0)") }
     """
 
-    # --- 初期化 ---
-    waves_all = {
-        sig: (bit_width, [int(float(v)) for v in values])
-        for sig, (bit_width, values) in waves.items()
-    }
+    # -------------------------------------------------
+    # ① waves_all 初期化（全信号を最初に登録）
+    # -------------------------------------------------
+    waves_all = {}
+
+    # 入力信号
+    for sig, (bw, values) in waves.items():
+        waves_all[sig] = (bw, [int(float(v)) for v in values])
 
     num_cycles = len(next(iter(waves.values()))[1])
 
-    # 生成信号の初期値（0）
-    for sig, (bit_width, _) in logic.items():
-        waves_all[sig] = (bit_width, [0] * num_cycles)
+    # 生成信号（comb / seq 共通）
+    for sig, (bw, _) in logic.items():
+        if sig not in waves_all:
+            waves_all[sig] = (bw, [0] * num_cycles)
 
-    # combinational / sequential 分離
+    # -------------------------------------------------
+    # ② comb / seq 分離
+    # -------------------------------------------------
     comb = {}
     seq = {}
 
     for sig, (_, expr) in logic.items():
-        if is_reg_expr(expr):
-            seq[sig] = expr
-        elif is_sequential(expr):
+        if is_reg_expr(expr) or is_sequential(expr):
             seq[sig] = expr
         else:
             comb[sig] = expr
 
-    # --- サイクルループ ---
+    # -------------------------------------------------
+    # ③ comb 依存グラフ → topo sort
+    # -------------------------------------------------
+    graph = {}
+    for sig, expr in comb.items():
+        expr2 = preprocess_expr(expr)
+        deps = extract_deps(expr2) & comb.keys()
+        graph[sig] = deps
+
+    comb_order = topo_sort(graph)
+
+    # -------------------------------------------------
+    # ④ REG init（C0）
+    # -------------------------------------------------
+    for sig, expr in seq.items():
+        if is_reg_expr(expr):
+            args = parse_reg(expr)
+            if "init" in args:
+                bw, values = waves_all[sig]
+                init_val = eval_expr_safe(args["init"], {})
+                values[0] = apply_width(init_val, bw)
+
+    # -------------------------------------------------
+    # ⑤ サイクルシミュレーション
+    # -------------------------------------------------
     for t in range(num_cycles):
 
+        # (a) base env（入力＋FF）
         env = build_env(waves_all, t)
-        #print("env =", env)
 
-        # --- combinational ---
-        for sig, expr in comb.items():
-            e = preprocess_expr(expr)
-            val = eval_expr_safe(e, env)
-            bit_width, values = waves_all[sig]
-            val = apply_width(val, bit_width)
+        # (b) comb を topo 順で全評価
+        for sig in comb_order:
+            expr = preprocess_expr(comb[sig])
+            bw, values = waves_all[sig]
+            val = eval_expr_safe(expr, env)
+            val = apply_width(val, bw)
             values[t] = val
+            env[sig] = val   # 次の comb が見えるように
 
-        # --- sequential ---
+        # (c) seq / REG（次サイクル）
         if t + 1 < num_cycles:
             for sig, expr in seq.items():
-                bit_width, values = waves_all[sig]
+                bw, values = waves_all[sig]
+                prev = values[t]
 
                 if is_reg_expr(expr):
                     args = parse_reg(expr)
-                    prev = values[t]
                     val = eval_reg(args, env, prev)
                 else:
-                    e = preprocess_expr(expr)
-                    val = eval_expr_safe(e, env)
+                    expr = preprocess_expr(expr)
+                    val = eval_expr_safe(expr, env)
 
-                val = apply_width(val, bit_width)
-                values[t + 1] = val
+                values[t + 1] = apply_width(val, bw)
 
-
-    #print("cnt =", waves_all["cnt"])
     return waves_all
+
 
 def apply_width(value, width):
     if width is None:
