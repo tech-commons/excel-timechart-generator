@@ -329,4 +329,3 @@ def apply_width(value, width):
     if width is None:
         return value
     return value & ((1 << width) - 1)
-
