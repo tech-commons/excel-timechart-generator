@@ -31,6 +31,7 @@ class SafeEvaluator(ast.NodeVisitor):
     BIN_OPS = {
         ast.Add: operator.add,
         ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
         ast.BitAnd: operator.and_,
         ast.BitOr: operator.or_,
         ast.LShift: operator.lshift,

@@ -1,6 +1,8 @@
 import pandas as pd
 import re
 
+HIER_SEP = "__"
+
 def load_timing_excel(
     filename,
     top_sheet="TOP",
@@ -9,18 +11,11 @@ def load_timing_excel(
     bit_width_col="bit_width",
     fill_init=0
 ):
-    """
-    Excelタイミング定義を読み込み、
-    waves（入力信号）と logic（生成信号の論理式）を返す
-
-    - TOPシート：入力信号 + インスタンス宣言
-    - 他シート ：サブモジュール定義
-    """
 
     xls = pd.ExcelFile(filename)
 
     # ----------------------------
-    # サブモジュール定義の読み込み
+    # サブモジュール定義
     # ----------------------------
     submodules = {}
 
@@ -33,49 +28,74 @@ def load_timing_excel(
 
         for _, row in df.iterrows():
             sig = row[signal_col]
-            bw  = int(row[bit_width_col])
+            bw_val = row.get(bit_width_col)
+
+            if pd.isna(bw_val):
+                bw = None
+            else:
+                bw = int(bw_val)
+
             expr = row[expr_col]
             mod[sig] = (bw, expr)
 
         submodules[sheet] = mod
 
     # ----------------------------
-    # TOPシート読み込み
+    # TOP読み込み
     # ----------------------------
     df = pd.read_excel(xls, top_sheet)
-
     cycle_cols = df.columns[3:]
 
-    # --- 入力信号 ---
-    input_df = df[df[expr_col].isna()].copy()
-    input_df[cycle_cols] = (
-        input_df[cycle_cols]
-        .ffill(axis=1)
-        .fillna(fill_init)
-    )
-
-    waves = {
-        row[signal_col]: (
-            int(row[bit_width_col]),
-            [str(v) for v in row[cycle_cols]]
-        )
-        for _, row in input_df.iterrows()
-    }
-
-    # --- logic（生成信号 or インスタンス） ---
+    waves = {}
     logic = {}
+    draw_order = []   # ← ★ 追加（順序保持）
 
-    inst_df = df[df[expr_col].notna()]
+    for _, row in df.iterrows():
 
-    for _, row in inst_df.iterrows():
         sig  = row[signal_col]
+        bw_val = row.get(bit_width_col)
+
+        if pd.isna(bw_val):
+            bw = None
+        else:
+            bw = int(bw_val)
+
         expr = row[expr_col]
 
-        # インスタンス判定：MOD(...)
+        if pd.isna(sig):
+            continue  # 完全空行はスキップ
+        # ----------------------
+        # 入力信号
+        # ----------------------
+        if pd.isna(expr):
+            if bw is None:
+                raise ValueError(f"bit_width missing for signal {sig}")
+
+            values = (
+                row[cycle_cols]
+                .ffill()
+                .fillna(fill_init)
+            )
+
+            waves[sig] = (
+                bw,
+                [str(v) for v in values]
+            )
+
+            draw_order.append(("signal", sig))
+            continue
+
+        # ----------------------
+        # インスタンス判定
+        # ----------------------
         m = re.match(r"(\w+)\((.*)\)", str(expr))
+
         if m and m.group(1) in submodules:
+
             mod_name, arg_str = m.groups()
             mod = submodules[mod_name]
+
+            draw_order.append(("instance_header", sig))
 
             # 引数解析
             ports = {}
@@ -84,27 +104,28 @@ def load_timing_excel(
                     k, v = a.split("=")
                     ports[k.strip()] = v.strip()
 
-            # サブモジュール展開
-            for local_sig, (bw, sub_expr) in mod.items():
-                inst = sig
-                HIER_SEP = "__"
-                full_sig = f"{inst}{HIER_SEP}{local_sig}"
+            for local_sig, (bw_sub, sub_expr) in mod.items():
+
+                full_sig = f"{sig}{HIER_SEP}{local_sig}"
 
                 e = sub_expr
 
                 # ローカル信号置換
                 for s in mod.keys():
-                    e = re.sub(rf"\b{s}\b", f"{inst}{HIER_SEP}{s}", e)
+                    e = re.sub(rf"\b{s}\b", f"{sig}{HIER_SEP}{s}", e)
 
                 # ポート置換
                 for p, net in ports.items():
                     e = re.sub(rf"\b{p}\b", net, e)
 
-                logic[full_sig] = (bw, e)
+                logic[full_sig] = (bw_sub, e)
+
+                draw_order.append(("signal", full_sig))
 
         else:
-            # 通常の生成信号
-            logic[sig] = (int(row[bit_width_col]), expr)
+            # 通常生成信号
+            logic[sig] = (bw, expr)
+            draw_order.append(("signal", sig))
 
-    return waves, logic
+    return waves, logic, draw_order
 

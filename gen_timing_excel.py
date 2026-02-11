@@ -22,7 +22,7 @@ wb = Workbook()
 ws = wb.active
 ws.title = "Timing"
 
-waves, logic = ld.load_timing_excel("input.xlsx")
+waves, logic, draw_order = ld.load_timing_excel("input.xlsx")
 waves_all = sim.simulate(waves, logic)
 
 start_row = 2
@@ -36,36 +36,84 @@ for sig, data in waves_all.items():
 row = start_row
 first = True
 
-for inst, sigs in groups.items():
-    inst_start = row
+current_inst = None
+inst_start_row = None
 
-    # 見出し行
-    ws.cell(row=row, column=1, value=f"[{inst}]")
-    row += 1
+for idx, (item_type, name) in enumerate(draw_order):
 
-    for sig, (bw, values) in sigs:
-        ws.cell(row=row, column=3, value="  " + sig)
+    # ----------------------------
+    # instance header
+    # ----------------------------
+    if item_type == "instance_header":
 
-        if first:
-            set_wave_column_width(ws, 6, len(values), width=2.8)
-            first = False
+        # もし前のインスタンスがあれば閉じる
+        if current_inst is not None:
+            inst_end = row - 1
+            ws.row_dimensions.group(
+                inst_start_row + 1,
+                inst_end,
+                outline_level=1,
+                hidden=True
+            )
 
-        dr.draw_wave(ws, row, 6, values, bw != 1)
+        ws.cell(row=row, column=1, value=f"[{name}]")
 
-        # --- 空行を詰める ---
-        empty_row = row + 1
-        ws.row_dimensions[empty_row].height = EMPTY_ROW_HEIGHT
+        current_inst = name
+        inst_start_row = row
 
-        row += 2
+        row += 1
+        continue
 
+    # ----------------------------
+    # signal
+    # ----------------------------
+    bw, values = waves_all[name]
+
+    ws.cell(row=row, column=1, value=name)
+
+    if first:
+        set_wave_column_width(ws, 6, len(values), width=2.8)
+        first = False
+
+    dr.draw_wave(ws, row, 6, values, bw != 1)
+
+    empty_row = row + 1
+    ws.row_dimensions[empty_row].height = EMPTY_ROW_HEIGHT
+
+    row += 2
+
+    # ----------------------------
+    # 次がinstance_headerなら今のを閉じる
+    # ----------------------------
+    next_is_header = (
+        idx + 1 < len(draw_order)
+        and draw_order[idx + 1][0] == "instance_header"
+    )
+
+    if next_is_header and current_inst is not None:
+        inst_end = row - 1
+        ws.row_dimensions.group(
+            inst_start_row + 1,
+            inst_end,
+            outline_level=1,
+            hidden=True
+        )
+        current_inst = None
+
+
+# ----------------------------
+# 最後のインスタンスを閉じる
+# ----------------------------
+if current_inst is not None:
     inst_end = row - 1
-
     ws.row_dimensions.group(
-        inst_start + 1,
+        inst_start_row + 1,
         inst_end,
         outline_level=1,
-        hidden=True   # ← 初期状態で折りたたむ
+        hidden=True
     )
+
+
 
 wb.save("timing_out.xlsx")
 
